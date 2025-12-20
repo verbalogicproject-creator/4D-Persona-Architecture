@@ -26,8 +26,9 @@ ENV/
 .coverage
 htmlcov/
 
-# Database (keep schema, ignore data)
-*.db
+# Database (ignore working copies, keep seed data)
+backend/*.db
+!data/soccer_ai.db
 
 # Node/Frontend
 node_modules/
