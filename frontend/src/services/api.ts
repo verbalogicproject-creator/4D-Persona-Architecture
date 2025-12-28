@@ -86,6 +86,102 @@ export async function sendChatMessage(
 }
 
 /**
+ * Send a message with streaming response (SSE)
+ *
+ * @param message - User's question/message
+ * @param conversationId - Optional conversation ID
+ * @param clubId - Optional club persona
+ * @param onChunk - Callback for each text chunk
+ * @param onDone - Callback when stream completes
+ * @param onError - Callback on error
+ */
+export async function sendChatMessageStream(
+  message: string,
+  conversationId: string | undefined,
+  clubId: string | undefined,
+  onChunk: (text: string) => void,
+  onDone: (conversationId: string) => void,
+  onError: (error: string) => void
+): Promise<void> {
+  const url = `${API_BASE_URL}${API_PREFIX}/chat/stream`
+
+  const request: ChatRequest = {
+    message,
+    ...(conversationId && { conversation_id: conversationId }),
+    ...(clubId && { club_id: clubId }),
+  }
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'ngrok-skip-browser-warning': 'true',
+      },
+      body: JSON.stringify(request),
+    })
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) {
+      throw new Error('No response body')
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let newConversationId = conversationId || ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+
+      // Process complete SSE events
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || '' // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6)
+
+          if (data === '[DONE]') {
+            onDone(newConversationId)
+            return
+          }
+
+          try {
+            const parsed = JSON.parse(data)
+            if (parsed.text) {
+              onChunk(parsed.text)
+            }
+            if (parsed.conversation_id) {
+              newConversationId = parsed.conversation_id
+            }
+            if (parsed.error) {
+              onError(parsed.error)
+              return
+            }
+          } catch {
+            // Not JSON, treat as plain text chunk
+            if (data.trim()) {
+              onChunk(data)
+            }
+          }
+        }
+      }
+    }
+
+    onDone(newConversationId)
+  } catch (error) {
+    onError(error instanceof Error ? error.message : 'Stream failed')
+  }
+}
+
+/**
  * Get available club personas
  */
 export async function getClubs(): Promise<Array<{ id: string; name: string }>> {
@@ -315,4 +411,143 @@ export async function getTeamKGGraph(teamId: number, depth: number = 2): Promise
  */
 export function getKGViewerUrl(): string {
   return `${API_BASE_URL}/kg-viewer`
+}
+
+// ============================================================================
+// Trivia APIs
+// ============================================================================
+
+export interface TriviaQuestion {
+  question_id: number
+  question: string
+  answers: string[]
+  category: string
+  difficulty: string
+}
+
+export interface TriviaResult {
+  correct: boolean
+  correct_answer: string
+  explanation?: string
+  stats?: {
+    times_asked: number
+    times_correct: number
+    accuracy: number
+  }
+}
+
+/**
+ * Get a trivia question
+ */
+export async function getTriviaQuestion(
+  teamId?: number,
+  category?: string,
+  difficulty?: string
+): Promise<TriviaQuestion | null> {
+  const params = new URLSearchParams()
+  if (teamId) params.append('team_id', String(teamId))
+  if (category) params.append('category', category)
+  if (difficulty) params.append('difficulty', difficulty)
+
+  const queryString = params.toString() ? `?${params.toString()}` : ''
+  const response = await fetchAPI<{ data: TriviaQuestion | null }>(`/trivia${queryString}`)
+  return response.data
+}
+
+/**
+ * Check a trivia answer
+ */
+export async function checkTriviaAnswer(
+  questionId: number,
+  answer: string
+): Promise<TriviaResult> {
+  const response = await fetchAPI<{ data: TriviaResult }>(
+    `/trivia/check?question_id=${questionId}&answer=${encodeURIComponent(answer)}`,
+    { method: 'POST' }
+  )
+  return response.data
+}
+
+/**
+ * Get trivia statistics
+ */
+export async function getTriviaStats(teamId?: number): Promise<any> {
+  const queryString = teamId ? `?team_id=${teamId}` : ''
+  const response = await fetchAPI<{ data: any }>(`/trivia/stats${queryString}`)
+  return response.data
+}
+
+// ============================================================================
+// Prediction APIs
+// ============================================================================
+
+export interface MatchPrediction {
+  match: string
+  favorite: string
+  underdog: string
+  upset_probability: number
+  confidence: string
+  factors: {
+    side_a: string[]
+    side_b: string[]
+    patterns: string[]
+  }
+  key_insight?: string
+}
+
+/**
+ * Get match prediction (manual data)
+ */
+export async function getMatchPrediction(
+  homeTeam: string,
+  awayTeam: string,
+  homeData: object = {},
+  awayData: object = {}
+): Promise<MatchPrediction> {
+  const response = await fetchAPI<{ data: MatchPrediction }>('/predict', {
+    method: 'POST',
+    body: JSON.stringify({
+      home_team: homeTeam,
+      away_team: awayTeam,
+      home_data: homeData,
+      away_data: awayData,
+    }),
+  })
+  return response.data
+}
+
+/**
+ * Get live match prediction (using external APIs)
+ */
+export async function getMatchPredictionLive(
+  homeTeam: string,
+  awayTeam: string
+): Promise<MatchPrediction> {
+  const response = await fetchAPI<{ data: MatchPrediction }>('/predict/live', {
+    method: 'POST',
+    body: JSON.stringify({
+      home_team: homeTeam,
+      away_team: awayTeam,
+    }),
+  })
+  return response.data
+}
+
+/**
+ * Get prediction patterns
+ */
+export async function getPredictionPatterns(): Promise<any[]> {
+  const response = await fetchAPI<{ data: any[] }>('/predict/patterns')
+  return response.data
+}
+
+/**
+ * Get match preview with prediction
+ */
+export async function getMatchPreview(
+  homeTeamId: number,
+  awayTeamId: number
+): Promise<any> {
+  const response = await fetchAPI<{ data: any }>(`/match/preview/${homeTeamId}/${awayTeamId}`)
+  return response.data
 }

@@ -285,6 +285,80 @@ CREATE INDEX IF NOT EXISTS idx_news_published ON news(published_at);
 CREATE INDEX IF NOT EXISTS idx_news_category ON news(category);
 
 -- ============================================
+-- IMPLEMENTATION GAP TRACKER (Meta-Tool)
+-- Prevents "forgotten implementations" pattern
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS implementation_gaps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feature_name TEXT NOT NULL,
+    source_doc TEXT,              -- Which .md/.ctx file defined it
+    source_line INTEGER,          -- Line number in source doc
+    status TEXT DEFAULT 'pending', -- pending, in_progress, completed, deferred
+    priority TEXT DEFAULT 'medium', -- critical, high, medium, low
+    assigned_phase TEXT,          -- Which phase it belongs to
+    completed_at DATETIME,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_gaps_status ON implementation_gaps(status);
+CREATE INDEX IF NOT EXISTS idx_gaps_priority ON implementation_gaps(priority);
+
+-- ============================================
+-- SECURITY INFRASTRUCTURE
+-- Session state machine + logging
+-- ============================================
+
+-- Session state tracking for escalation
+CREATE TABLE IF NOT EXISTS session_state (
+    session_id TEXT PRIMARY KEY,
+    state TEXT DEFAULT 'normal',   -- normal, warned, cautious, escalated, probation
+    injection_count INTEGER DEFAULT 0,
+    clean_query_count INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_activity DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Security event log (injection attempts)
+CREATE TABLE IF NOT EXISTS security_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    attempt_number INTEGER,
+    query_hash TEXT,              -- SHA256 hash, not raw query
+    pattern_matched TEXT,
+    escalation_level TEXT,
+    response_type TEXT            -- snap_back, security_persona, normal
+);
+
+CREATE INDEX IF NOT EXISTS idx_security_session ON security_log(session_id);
+CREATE INDEX IF NOT EXISTS idx_security_timestamp ON security_log(timestamp);
+
+-- ============================================
+-- TRIVIA SYSTEM
+-- Fan engagement through quizzes
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS trivia_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id INTEGER REFERENCES teams(id),
+    category TEXT,                -- legends, history, transfers, rivalries, stats
+    difficulty TEXT DEFAULT 'medium', -- easy, medium, hard, expert
+    question TEXT NOT NULL,
+    correct_answer TEXT NOT NULL,
+    wrong_answers TEXT,           -- JSON array of 3 wrong answers
+    explanation TEXT,             -- Why this answer is correct
+    times_asked INTEGER DEFAULT 0,
+    times_correct INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_trivia_team ON trivia_questions(team_id);
+CREATE INDEX IF NOT EXISTS idx_trivia_category ON trivia_questions(category);
+CREATE INDEX IF NOT EXISTS idx_trivia_difficulty ON trivia_questions(difficulty);
+
+-- ============================================
 -- EXAMPLE QUERIES (for RAG reference)
 -- ============================================
 

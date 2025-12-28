@@ -231,6 +231,62 @@ export interface ChatState {
 }
 
 // ============================================================================
+// Trivia Types
+// ============================================================================
+
+export interface TriviaQuestion {
+  question_id: number
+  question: string
+  answers: string[]
+  category: 'history' | 'players' | 'matches' | 'legends' | 'stadium' | string
+  difficulty: 'easy' | 'medium' | 'hard'
+}
+
+export interface TriviaResult {
+  correct: boolean
+  correct_answer: string
+  explanation?: string
+  stats?: {
+    times_asked: number
+    times_correct: number
+    accuracy: number
+  }
+}
+
+export interface TriviaStats {
+  total_questions: number
+  questions_by_category: Record<string, number>
+  questions_by_difficulty: Record<string, number>
+  average_accuracy: number
+}
+
+// ============================================================================
+// Prediction Types
+// ============================================================================
+
+export interface MatchPrediction {
+  match: string
+  favorite: string
+  underdog: string
+  upset_probability: number
+  confidence: 'low' | 'medium' | 'high'
+  factors: {
+    side_a: string[]  // Favorite weaknesses
+    side_b: string[]  // Underdog strengths
+    patterns: string[]  // Third Knowledge bonuses
+  }
+  key_insight?: string
+}
+
+export interface PredictionPattern {
+  id: string
+  name: string
+  trigger: string[]
+  bonus: number
+  description: string
+}
+
+// ============================================================================
 // Utility Types
 // ============================================================================
 

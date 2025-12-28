@@ -1,12 +1,30 @@
 """
 Soccer-AI RAG Module
 Retrieval Augmented Generation - extracts relevant context from database
+
+Enhanced with 500-node Knowledge Graph (Dec 2024)
 """
 
 import re
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import database
+
+# Import 500-node KG integration
+try:
+    from kg_integration import get_kg
+    KG_AVAILABLE = True
+except ImportError:
+    KG_AVAILABLE = False
+
+# Import new enhanced components (Dec 2024)
+try:
+    from mood_engine import get_mood_engine
+    from match_insights import get_match_insights
+    from football_api import get_football_api
+    ENHANCED_COMPONENTS = True
+except ImportError:
+    ENHANCED_COMPONENTS = False
 
 
 # ============================================
@@ -145,6 +163,10 @@ def detect_intent(query: str) -> str:
     """
     Detect the intent of the query.
     Returns: score, injury, transfer, fixture, standing, player_info, team_info, general
+
+    Enhancement: Added keywords for better standing detection
+    - "top", "leading", "first place", "last place", "bottom", "relegation"
+    Bug fix: Prioritize standing queries over player_info for "who is top" type queries
     """
     query = query.lower()
 
@@ -160,12 +182,29 @@ def detect_intent(query: str) -> str:
     if any(word in query for word in ["transfer", "sign", "buy", "sell", "loan", "rumor", "deal"]):
         return "transfer"
 
-    # Fixture/schedule queries
-    if any(word in query for word in ["next game", "fixture", "when", "schedule", "playing next"]):
+    # Fixture/schedule queries - ENHANCED
+    # Check phrases first (multi-word), then single words
+    fixture_phrases = [
+        "games today", "games tomorrow", "matches today", "matches tomorrow",
+        "playing next", "next game", "this weekend", "next week", "upcoming games",
+        "what games", "which games", "any games", "today's games", "tomorrow's games"
+    ]
+    fixture_words = ["fixture", "fixtures", "schedule", "upcoming"]
+
+    if any(phrase in query for phrase in fixture_phrases):
+        return "fixture"
+    if any(word in query for word in fixture_words):
         return "fixture"
 
-    # Standing/table queries
-    if any(word in query for word in ["standing", "table", "position", "rank", "points"]):
+    # Standing/table queries - ENHANCED with more keywords
+    standing_keywords = [
+        "standing", "table", "position", "rank", "points",
+        "top of", "leading", "leader", "first place", "1st place",
+        "last place", "bottom", "relegated", "relegation zone",
+        "top 4", "top four", "champions league places",
+        "league table", "how many points"
+    ]
+    if any(word in query for word in standing_keywords):
         return "standing"
 
     # Stats queries
@@ -254,53 +293,114 @@ def retrieve_context(query: str) -> Tuple[str, List[Dict]]:
 
 
 def retrieve_score_context(entities: Dict) -> Tuple[str, List[Dict]]:
-    """Retrieve game score/result context."""
+    """
+    Retrieve game score/result context.
+
+    Enhancement: Show all recent scores when no specific team mentioned
+    - "What were yesterday's scores?" → Show yesterday's results
+    - "Latest results" → Show recent finished games
+    """
     context_lines = []
     sources = []
 
-    for team_name in entities.get("teams", []):
-        team = database.get_team_by_name(team_name)
-        if not team:
-            continue
+    query_lower = entities.get("raw_query", "").lower()
 
-        # Get recent games
-        if entities.get("dates"):
-            # Specific date
-            games = database.get_games(
-                team_id=team["id"],
-                date_from=entities["dates"][0],
-                date_to=entities["dates"][0],
-                limit=5
-            )
-        else:
-            # Recent games
-            games = database.get_recent_games(team["id"], limit=3)
+    # If specific team(s) mentioned
+    if entities.get("teams"):
+        for team_name in entities["teams"]:
+            team = database.get_team_by_name(team_name)
+            if not team:
+                continue
 
-        for game in games:
-            home = game["home_team_name"]
-            away = game["away_team_name"]
-            score = f"{game.get('home_score', '?')}-{game.get('away_score', '?')}"
-            date = game["date"]
-            status = game["status"]
-
-            if status == "finished":
-                context_lines.append(
-                    f"Game on {date}: {home} {score} {away} at {game.get('venue', 'unknown venue')}"
+            # Get recent games
+            if entities.get("dates"):
+                # Specific date
+                games = database.get_games(
+                    team_id=team["id"],
+                    date_from=entities["dates"][0],
+                    date_to=entities["dates"][0],
+                    limit=5
                 )
             else:
-                context_lines.append(
-                    f"Upcoming game on {date}: {home} vs {away} ({status})"
-                )
+                # Recent games
+                games = database.get_recent_games(team["id"], limit=3)
 
-            sources.append({"type": "game", "id": game["id"]})
+            for game in games:
+                home = game["home_team_name"]
+                away = game["away_team_name"]
+                score = f"{game.get('home_score', '?')}-{game.get('away_score', '?')}"
+                date = game["date"]
+                status = game["status"]
 
-            # Get events if available
-            if game.get("events"):
-                for event in game["events"]:
-                    if event["event_type"] == "goal":
+                if status == "finished":
+                    context_lines.append(
+                        f"Game on {date}: {home} {score} {away} at {game.get('venue', 'unknown venue')}"
+                    )
+                else:
+                    context_lines.append(
+                        f"Upcoming game on {date}: {home} vs {away} ({status})"
+                    )
+
+                sources.append({"type": "game", "id": game["id"]})
+
+                # Get events if available
+                if game.get("events"):
+                    for event in game["events"]:
+                        if event["event_type"] == "goal":
+                            context_lines.append(
+                                f"  - Goal: {event['player_name']} ({event['minute']}')"
+                            )
+
+    # No specific team - show recent scores
+    else:
+        # Determine target date
+        target_date = None
+        date_desc = None
+        if "yesterday" in query_lower:
+            target_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            date_desc = "yesterday"
+        elif "today" in query_lower:
+            target_date = datetime.now().strftime("%Y-%m-%d")
+            date_desc = "today"
+        elif entities.get("dates") and ("latest" not in query_lower and "recent" not in query_lower):
+            # Only use extracted date if not asking for "latest/recent" (which should show all recent games)
+            target_date = entities["dates"][0]
+            date_desc = target_date
+
+        # Get games for target date
+        if target_date:
+            # Use get_games with date filter
+            games = database.get_games(date_from=target_date, date_to=target_date, status="finished", limit=20)
+            if games:
+                context_lines.append(f"Results from {date_desc}:")
+                for game in games:
+                    score = f"{game.get('home_score', '?')}-{game.get('away_score', '?')}"
+                    context_lines.append(
+                        f"  - {game['home_team_name']} {score} {game['away_team_name']}"
+                    )
+                    sources.append({"type": "game", "id": game["id"]})
+            else:
+                # No games on that date - show most recent instead
+                games = database.get_games(status="finished", limit=5)
+                if games:
+                    context_lines.append(f"No games on {date_desc}. Most recent results:")
+                    for game in games:
+                        score = f"{game.get('home_score', '?')}-{game.get('away_score', '?')}"
                         context_lines.append(
-                            f"  - Goal: {event['player_name']} ({event['minute']}')"
+                            f"  - {game['date']}: {game['home_team_name']} {score} {game['away_team_name']}"
                         )
+                        sources.append({"type": "game", "id": game["id"]})
+        else:
+            # Show recent finished games - order by date descending
+            games = database.get_games(status="finished", limit=10)
+            if games:
+                context_lines.append("Recent Premier League results:")
+                for game in games:
+                    score = f"{game.get('home_score', '?')}-{game.get('away_score', '?')}"
+                    context_lines.append(
+                        f"  - {game['date']}: {game['home_team_name']} {score} {game['away_team_name']}"
+                    )
+                    sources.append({"type": "game", "id": game["id"]})
 
     return "\n".join(context_lines), sources
 
@@ -381,21 +481,90 @@ def retrieve_transfer_context(entities: Dict) -> Tuple[str, List[Dict]]:
 
 
 def retrieve_fixture_context(entities: Dict) -> Tuple[str, List[Dict]]:
-    """Retrieve upcoming fixture context."""
+    """
+    Retrieve upcoming fixture context.
+
+    Enhancement: Show all upcoming games when no specific team mentioned
+    - "What games are today?" → Show today's fixtures
+    - "Fixtures this weekend" → Show upcoming games
+    """
     context_lines = []
     sources = []
 
-    for team_name in entities.get("teams", []):
-        team = database.get_team_by_name(team_name)
-        if team:
-            fixtures = database.get_upcoming_games(team["id"], limit=5)
-            if fixtures:
-                context_lines.append(f"Upcoming games for {team_name}:")
-                for game in fixtures:
-                    opponent = game["away_team_name"] if game["home_team_id"] == team["id"] else game["home_team_name"]
-                    venue = "home" if game["home_team_id"] == team["id"] else "away"
+    query_lower = entities.get("raw_query", "").lower()
+
+    # If specific team(s) mentioned
+    if entities.get("teams"):
+        for team_name in entities["teams"]:
+            team = database.get_team_by_name(team_name)
+            if team:
+                fixtures = database.get_upcoming_games(team["id"], limit=5)
+                if fixtures:
+                    context_lines.append(f"Upcoming games for {team_name}:")
+                    for game in fixtures:
+                        opponent = game["away_team_name"] if game["home_team_id"] == team["id"] else game["home_team_name"]
+                        venue = "home" if game["home_team_id"] == team["id"] else "away"
+                        context_lines.append(
+                            f"  - {game['date']}: vs {opponent} ({venue})"
+                        )
+                        sources.append({"type": "game", "id": game["id"]})
+
+    # No specific team - show all upcoming games (filtered by date if specified)
+    else:
+        # Check for date/time context
+        target_date = None
+        if "today" in query_lower:
+            target_date = datetime.now().strftime("%Y-%m-%d")
+        elif "tomorrow" in query_lower:
+            target_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        elif entities.get("dates"):
+            target_date = entities["dates"][0]
+
+        # Get fixtures
+        if target_date:
+            # Use get_games with date filter
+            games = database.get_games(date_from=target_date, date_to=target_date, status="scheduled", limit=20)
+            if games:
+                date_str = "today" if "today" in query_lower else target_date
+                context_lines.append(f"Fixtures for {date_str}:")
+                for game in games:
+                    time_str = game.get('time', '')
+                    status = game.get('status', 'scheduled')
                     context_lines.append(
-                        f"  - {game['date']}: vs {opponent} ({venue})"
+                        f"  - {game['home_team_name']} vs {game['away_team_name']}"
+                        f" ({time_str if time_str else status})"
+                    )
+                    sources.append({"type": "game", "id": game["id"]})
+            else:
+                # No games on exact date - show ALL scheduled games (don't filter by date)
+                fixtures = database.get_games(status="scheduled", limit=10)
+                if fixtures:
+                    context_lines.append(f"No fixtures scheduled for {target_date}. Upcoming games:")
+                    for game in fixtures[:8]:
+                        context_lines.append(
+                            f"  - {game['date']}: {game['home_team_name']} vs {game['away_team_name']}"
+                        )
+                        sources.append({"type": "game", "id": game["id"]})
+                else:
+                    # Truly no scheduled games - show recent past games
+                    past_games = database.get_games(status="finished", limit=5)
+                    if past_games:
+                        context_lines.append(f"No upcoming fixtures. Most recent completed games:")
+                        for game in past_games:
+                            score = f"{game.get('home_score', '?')}-{game.get('away_score', '?')}"
+                            context_lines.append(
+                                f"  - {game['date']}: {game['home_team_name']} {score} {game['away_team_name']}"
+                            )
+                            sources.append({"type": "game", "id": game["id"]})
+        else:
+            # Show next few days of fixtures - use get_games with date filter
+            today = datetime.now().strftime("%Y-%m-%d")
+            fixtures = database.get_games(date_from=today, status="scheduled", limit=10)
+            if fixtures:
+                context_lines.append("Upcoming Premier League fixtures:")
+                for game in fixtures:
+                    context_lines.append(
+                        f"  - {game['date']}: {game['home_team_name']} vs {game['away_team_name']}"
                     )
                     sources.append({"type": "game", "id": game["id"]})
 
@@ -403,34 +572,89 @@ def retrieve_fixture_context(entities: Dict) -> Tuple[str, List[Dict]]:
 
 
 def retrieve_standing_context(entities: Dict) -> Tuple[str, List[Dict]]:
-    """Retrieve league standings context."""
+    """
+    Retrieve league standings context.
+
+    Enhancement: Show full league table when no specific team mentioned
+    - Detects "Premier League", "the league" in query
+    - Shows top 10 if no team specified
+    - Shows full context for specific team queries
+    """
     context_lines = []
     sources = []
 
-    leagues = ["Premier League", "La Liga", "Bundesliga", "Serie A", "Ligue 1"]
+    query_lower = entities.get("raw_query", "").lower()
 
-    for team_name in entities.get("teams", []):
-        team = database.get_team_by_name(team_name)
-        if team:
-            standings = database.get_standings(team["league"])
-            team_standing = next((s for s in standings if s["team_id"] == team["id"]), None)
-            if team_standing:
-                context_lines.append(
-                    f"{team_name} in {team['league']}: "
-                    f"Position {team_standing['position']}, "
-                    f"{team_standing['points']} points, "
-                    f"Form: {team_standing.get('form', 'N/A')}"
-                )
-                sources.append({"type": "standing", "team_id": team["id"]})
+    # Detect league mentions in query
+    league_name = None
+    if "premier league" in query_lower or "epl" in query_lower or "the league" in query_lower:
+        league_name = "Premier League"
+    elif "la liga" in query_lower or "spanish" in query_lower:
+        league_name = "La Liga"
+    elif "serie a" in query_lower or "italian" in query_lower:
+        league_name = "Serie A"
+    elif "bundesliga" in query_lower or "german" in query_lower:
+        league_name = "Bundesliga"
+    elif "ligue 1" in query_lower or "french" in query_lower:
+        league_name = "Ligue 1"
 
-                # Show nearby teams
-                pos = team_standing["position"]
-                nearby = [s for s in standings if abs(s["position"] - pos) <= 2]
-                context_lines.append("Nearby teams:")
-                for s in nearby:
+    # If specific team(s) mentioned, show team-specific context
+    if entities.get("teams"):
+        for team_name in entities["teams"]:
+            team = database.get_team_by_name(team_name)
+            if team:
+                standings = database.get_standings(team["league"])
+                team_standing = next((s for s in standings if s["team_id"] == team["id"]), None)
+                if team_standing:
                     context_lines.append(
-                        f"  {s['position']}. {s['team_name']} - {s['points']} pts"
+                        f"{team_name} in {team['league']}: "
+                        f"Position {team_standing['position']}, "
+                        f"{team_standing['points']} points, "
+                        f"Form: {team_standing.get('form', 'N/A')}"
                     )
+                    sources.append({"type": "standing", "team_id": team["id"]})
+
+                    # Show nearby teams
+                    pos = team_standing["position"]
+                    nearby = [s for s in standings if abs(s["position"] - pos) <= 2]
+                    context_lines.append("Nearby teams:")
+                    for s in nearby:
+                        context_lines.append(
+                            f"  {s['position']}. {s['team_name']} - {s['points']} pts"
+                        )
+
+    # If no specific teams but league detected, show full table
+    elif league_name:
+        standings = database.get_standings(league_name)
+        if standings:
+            context_lines.append(f"{league_name} Standings (2024-25):")
+            context_lines.append("")
+            # Show top 10
+            for s in standings[:10]:
+                form = s.get('form', '')
+                form_str = f" (Form: {form})" if form else ""
+                context_lines.append(
+                    f"{s['position']:2d}. {s['team_name']:20s} {s['points']:2d} pts "
+                    f"| {s.get('played', 0)}P {s.get('won', 0)}W {s.get('drawn', 0)}D {s.get('lost', 0)}L{form_str}"
+                )
+                sources.append({"type": "standing", "team_id": s["team_id"]})
+
+            # If query asks about "top" or "leading", emphasize leader
+            if "top" in query_lower or "leading" in query_lower or "first" in query_lower:
+                leader = standings[0]
+                context_lines.insert(1, f"Current leader: {leader['team_name']} with {leader['points']} points\n")
+
+    # Fallback: If nothing specific, show Premier League (default)
+    elif not context_lines:
+        standings = database.get_standings("Premier League")
+        if standings:
+            context_lines.append("Premier League Standings (2024-25) - Top 5:")
+            context_lines.append("")
+            for s in standings[:5]:
+                context_lines.append(
+                    f"{s['position']}. {s['team_name']} - {s['points']} pts"
+                )
+                sources.append({"type": "standing", "team_id": s["team_id"]})
 
     return "\n".join(context_lines), sources
 
@@ -747,10 +971,95 @@ def retrieve_kg_context(entities: Dict) -> Tuple[str, List[Dict]]:
     return "\n".join(context_parts), sources
 
 
-def retrieve_hybrid(query: str) -> Tuple[str, List[Dict], Dict]:
+# ============================================
+# CLUB PERSONA HELPERS
+# ============================================
+
+def get_team_id_by_name(club_name: str) -> Optional[int]:
+    """Get team ID from club name (handles aliases)."""
+    if not club_name:
+        return None
+
+    # Normalize the name
+    normalized = club_name.lower().replace("_", " ").strip()
+
+    # Check aliases first
+    canonical = TEAM_ALIASES.get(normalized, normalized.title())
+
+    # Query database for team
+    teams = database.search_teams(canonical, limit=1)
+    if teams:
+        return teams[0]["id"]
+
+    return None
+
+
+def get_club_persona_context(club_name: str) -> Tuple[str, List[Dict]]:
+    """
+    Get rich context for a club persona.
+    Returns identity, legends, rivalries, mood - everything needed for persona.
+    """
+    context_parts = []
+    sources = []
+
+    team_id = get_team_id_by_name(club_name)
+    if not team_id:
+        return "", []
+
+    # Club identity
+    identity = database.get_club_identity(team_id)
+    if identity:
+        context_parts.append(f"## Your Club: {identity.get('name', club_name)}")
+        if identity.get("founded"):
+            context_parts.append(f"**Founded**: {identity['founded']}")
+        if identity.get("stadium"):
+            context_parts.append(f"**Home**: {identity['stadium']}")
+        if identity.get("nickname"):
+            context_parts.append(f"**Known as**: {identity['nickname']}")
+        if identity.get("philosophy"):
+            context_parts.append(f"**Philosophy**: {identity['philosophy']}")
+        sources.append({"type": "club_identity", "id": team_id})
+
+    # Legends
+    legends = database.get_legends(team_id, limit=5)
+    if legends:
+        context_parts.append("\n## Your Legends")
+        for legend in legends:
+            context_parts.append(f"- **{legend['name']}** ({legend.get('years', 'legend')})")
+            if legend.get("nickname"):
+                context_parts.append(f"  Known as: {legend['nickname']}")
+        sources.append({"type": "legends", "id": team_id})
+
+    # Rivalries
+    rivalries = database.get_club_rivalries(team_id)
+    if rivalries:
+        context_parts.append("\n## Your Rivalries")
+        for rivalry in rivalries[:3]:
+            context_parts.append(f"- **{rivalry['rival_name']}** ({rivalry.get('rivalry_type', 'rivalry')})")
+            context_parts.append(f"  Intensity: {rivalry.get('intensity', 5)}/10")
+        sources.append({"type": "rivalries", "id": team_id})
+
+    # Iconic moments
+    moments = database.get_club_moments(team_id, limit=3)
+    if moments:
+        context_parts.append("\n## Iconic Moments")
+        for moment in moments:
+            context_parts.append(f"- **{moment['title']}**")
+        sources.append({"type": "moments", "id": team_id})
+
+    return "\n".join(context_parts), sources
+
+
+def retrieve_hybrid(query: str, club: str = None) -> Tuple[str, List[Dict], Dict]:
     """
     Hybrid retrieval combining FTS5 + Knowledge Graph.
     Formula: β=0.60 (FTS5) + γ=0.40 (Graph)
+
+    Enhanced with 500-node KG (Dec 2024) for deeper football knowledge.
+
+    Args:
+        query: User's question
+        club: Optional club name for persona-aware retrieval (e.g., "arsenal", "chelsea")
     """
     # Extract entities with KG resolution
     entities = extract_kg_entities(query)
@@ -758,23 +1067,99 @@ def retrieve_hybrid(query: str) -> Tuple[str, List[Dict], Dict]:
     # Get FTS5 context (standard RAG)
     fts_context, fts_sources = retrieve_context(query)
 
-    # Get KG context
+    # Get KG context from original KG
     kg_context, kg_sources = retrieve_kg_context(entities)
+
+    # === ENHANCED: 500-node KG Integration ===
+    enhanced_kg_context = ""
+    if KG_AVAILABLE:
+        try:
+            kg = get_kg()
+            enhanced_result = kg.get_enhanced_context(query, club=club)
+            if enhanced_result.get("combined_context"):
+                enhanced_kg_context = enhanced_result["combined_context"]
+                # Add stats to track
+                entities["enhanced_kg"] = enhanced_result.get("kg_stats", {})
+        except Exception as e:
+            pass  # Graceful degradation if enhanced KG fails
+
+    # If club specified but not detected in query, add club context
+    team_node = None
+    if entities.get("kg_nodes"):
+        team_node = next((n for n in entities["kg_nodes"] if n["node_type"] == "team"), None)
+
+    # Club persona enrichment: add club context even for generic queries
+    if club and club != "default" and not team_node:
+        club_context, club_sources = get_club_persona_context(club)
+        if club_context:
+            kg_context = club_context + "\n" + kg_context if kg_context else club_context
+            kg_sources.extend(club_sources)
+        # Also get the team node for mood
+        team_id = get_team_id_by_name(club)
+        if team_id:
+            team_node = {"entity_id": team_id, "node_type": "team"}
 
     # Get mood for emotional calibration
     team_mood = None
-    if entities.get("kg_nodes"):
-        team_node = next((n for n in entities["kg_nodes"] if n["node_type"] == "team"), None)
-        if team_node:
-            team_mood = database.get_club_mood(team_node["entity_id"])
+    if team_node:
+        team_mood = database.get_club_mood(team_node["entity_id"])
 
-    # Fuse contexts
+    # Fuse contexts (original)
     fused_context = fuse_contexts(fts_context, kg_context, team_mood)
+
+    # === ENHANCED: Append 500-node KG context ===
+    if enhanced_kg_context:
+        fused_context = fused_context + "\n\n=== Enhanced Knowledge (500-node KG) ===\n" + enhanced_kg_context
+
+    # === NEW: Live Data Integration (Dec 2024) ===
+    live_context_parts = []
+    enhanced_mood = None
+
+    if ENHANCED_COMPONENTS and club and club != "default":
+        try:
+            # Get mood from live results
+            mood_engine = get_mood_engine()
+            club_name = club.replace("_", " ").title()
+            mood_result = mood_engine.generate_mood_aware_opening(club_name)
+            enhanced_mood = {
+                "mood": mood_result.get("mood"),
+                "mood_value": mood_result.get("mood_value"),
+                "tone": mood_result.get("tone"),
+                "banter_level": mood_result.get("banter_level"),
+                "reason": mood_result.get("context", {}).get("mood_reason")
+            }
+            live_context_parts.append(f"Current Mood: {mood_result.get('mood')} - {mood_result.get('context', {}).get('mood_reason', '')}")
+
+            # Get match insights for detected teams
+            insights = get_match_insights()
+            detected_teams = entities.get("teams", [])
+
+            # If another team is mentioned, get H2H
+            if detected_teams and detected_teams[0].lower() != club_name.lower():
+                opponent = detected_teams[0]
+                h2h = insights.head_to_head(club_name, opponent)
+                if h2h.get("total_matches", 0) > 0:
+                    live_context_parts.append(
+                        f"H2H vs {opponent}: {h2h['team1_wins']}W-{h2h['draws']}D-{h2h['team2_wins']}L "
+                        f"({h2h['total_matches']} matches)"
+                    )
+
+            # Get ELO context
+            elo = insights.get_elo_trajectory(club_name)
+            if elo.get("current"):
+                live_context_parts.append(f"Current ELO: {elo['current']['elo']:.0f} (Peak: {elo['peak']['elo']:.0f} in {elo['peak']['date'][:4]})")
+
+        except Exception as e:
+            pass  # Graceful degradation
+
+    if live_context_parts:
+        fused_context = fused_context + "\n\n=== Live Data ===\n" + "\n".join(live_context_parts)
 
     # Combine and deduplicate sources
     all_sources = deduplicate_sources(fts_sources + kg_sources)
 
     # Metadata
+    enhanced_stats = entities.get("enhanced_kg", {})
     metadata = {
         "entities": {
             "teams": entities.get("teams", []),
@@ -783,10 +1168,130 @@ def retrieve_hybrid(query: str) -> Tuple[str, List[Dict], Dict]:
         },
         "kg_intent": entities.get("kg_intent"),
         "mood": team_mood.get("current_mood") if team_mood else None,
-        "retrieval_type": "hybrid_kg_rag"
+        "retrieval_type": "hybrid_kg_rag_enhanced",
+        "enhanced_kg": {
+            "available": KG_AVAILABLE,
+            "entities_matched": enhanced_stats.get("entities_matched", 0),
+            "facts_found": enhanced_stats.get("facts_found", 0),
+        },
+        "live_mood": enhanced_mood,  # New: mood from live results
+        "enhanced_components": ENHANCED_COMPONENTS,
     }
 
     return fused_context, all_sources, metadata
+
+
+# ============================================
+# HIGH IMPACT: RIVAL DETECTION & BANTER
+# ============================================
+
+def detect_rival_mention(query: str, persona_data: Dict) -> Optional[Dict]:
+    """
+    Detect if query mentions a rival team.
+    Returns rivalry data if found, None otherwise.
+    """
+    if not persona_data or not persona_data.get("rivalries"):
+        return None
+
+    query_lower = query.lower()
+
+    for rivalry in persona_data["rivalries"]:
+        rival_name = rivalry.get("rival_name", "").lower()
+        # Check various forms: "tottenham", "spurs", "tott"
+        if rival_name in query_lower or any(
+            word in query_lower
+            for word in rival_name.split()
+        ):
+            return rivalry
+
+    return None
+
+
+def enrich_with_rivalry(context: str, rivalry: Dict) -> str:
+    """
+    Inject rivalry data and banter into context.
+    HIGH IMPACT: This makes rival mentions feel AUTHENTIC.
+    """
+    if not rivalry:
+        return context
+
+    rivalry_section = f"""
+
+## 🔥 RIVALRY DETECTED
+Rival: {rivalry.get('rival_name')}
+Intensity: {rivalry.get('intensity', 5)}/10
+Type: {rivalry.get('rivalry_type', 'unknown')}
+
+Origin Story:
+{rivalry.get('origin_story', 'Historic rivalry')}
+
+Banter Arsenal (you can use):
+{', '.join(rivalry.get('banter_phrases', []))}
+
+IMPORTANT: Show EMOTION when discussing this rival. The intensity is {rivalry.get('intensity')}/10 - let that guide how strongly you feel about them.
+"""
+
+    return context + rivalry_section
+
+
+def detect_squad_query(query: str) -> bool:
+    """Detect if query is about squad fitness/injuries."""
+    squad_keywords = [
+        "squad", "injuries", "injured", "fitness", "who's out", "who is out",
+        "team news", "how's the squad", "squad looking", "who can't play"
+    ]
+    query_lower = query.lower()
+    return any(keyword in query_lower for keyword in squad_keywords)
+
+
+def enrich_with_injuries(context: str, team_id: int) -> str:
+    """
+    Inject current injury list for squad fitness queries.
+    HIGH IMPACT: Adds current context to squad discussions.
+    """
+    injuries = database.get_injuries(team_id=team_id, status="out")
+    if not injuries:
+        return context
+
+    injury_section = "\n\n## 🏥 CURRENT INJURIES\n"
+    for injury in injuries[:5]:  # Top 5 injuries
+        injury_section += f"- {injury.get('player_name')}: {injury.get('injury_type')} (out until {injury.get('expected_return', 'TBD')})\n"
+
+    return context + injury_section
+
+
+# ============================================
+# POLISH: LEGEND COMPARISONS
+# ============================================
+
+def detect_legend_comparison(query: str) -> bool:
+    """Detect if query compares current player to legends."""
+    comparison_phrases = [
+        "next", "like", "reminds me of", "better than", "as good as",
+        "compared to", "vs", "versus"
+    ]
+    query_lower = query.lower()
+    return any(phrase in query_lower for phrase in comparison_phrases)
+
+
+def enrich_with_legends(context: str, persona_data: Dict) -> str:
+    """
+    Add legend reference data for comparison queries.
+    POLISH: Enables natural comparisons to club legends.
+    """
+    if not persona_data or not persona_data.get("legends"):
+        return context
+
+    legends = persona_data["legends"][:3]  # Top 3 legends
+    if not legends:
+        return context
+
+    legend_section = "\n\n## ⭐ CLUB LEGENDS (for comparison context)\n"
+    for legend in legends:
+        legend_section += f"- **{legend.get('name')}** ({legend.get('era')}): {legend.get('fan_nickname', 'Legend')}\n"
+        legend_section += f"  {legend.get('story', 'Club icon')}\n"
+
+    return context + legend_section
 
 
 def fuse_contexts(fts_context: str, kg_context: str, mood: Dict = None) -> str:

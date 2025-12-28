@@ -5,7 +5,15 @@ import { useChat } from '@/hooks/useChat'
 
 export function Chat() {
   const [selectedClub, setSelectedClub] = useState<string | null>(null)
-  const { messages, conversationId, isLoading, sendMessage, clearChat } = useChat(selectedClub || undefined)
+  const {
+    messages,
+    conversationId,
+    isLoading,
+    sendMessage,
+    clearChat,
+    streamingEnabled,
+    toggleStreaming,
+  } = useChat(selectedClub || undefined)
 
   const handleClubSelect = (clubId: string) => {
     setSelectedClub(clubId)
@@ -31,6 +39,8 @@ export function Chat() {
         conversationId={conversationId}
         onClearChat={handleChangeClub}
         clubId={selectedClub}
+        streamingEnabled={streamingEnabled}
+        onToggleStreaming={toggleStreaming}
       />
     </div>
   )

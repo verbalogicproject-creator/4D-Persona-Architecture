@@ -19,6 +19,8 @@ interface ChatContainerProps {
   conversationId: string | null
   onClearChat?: () => void
   clubId?: string
+  streamingEnabled?: boolean
+  onToggleStreaming?: () => void
 }
 
 export function ChatContainer({
@@ -26,6 +28,8 @@ export function ChatContainer({
   onSendMessage,
   isLoading,
   onClearChat,
+  streamingEnabled = true,
+  onToggleStreaming,
 }: ChatContainerProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -61,19 +65,43 @@ export function ChatContainer({
           </p>
         </div>
 
-        {/* Clear chat button (only show if there are messages) */}
-        {messages.length > 0 && onClearChat && (
-          <button
-            onClick={onClearChat}
-            className="px-4 py-2 rounded-lg text-sm font-medium transition-colors hover:opacity-80"
-            style={{
-              backgroundColor: theme.colors.background.elevated,
-              color: theme.colors.text.secondary,
-            }}
-          >
-            Clear Chat
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {/* Streaming toggle button */}
+          {onToggleStreaming && (
+            <button
+              onClick={onToggleStreaming}
+              className="px-3 py-2 rounded-lg text-sm font-medium transition-colors hover:opacity-80 flex items-center gap-1"
+              style={{
+                backgroundColor: streamingEnabled
+                  ? theme.colors.primary
+                  : theme.colors.background.elevated,
+                color: streamingEnabled
+                  ? '#fff'
+                  : theme.colors.text.secondary,
+              }}
+              title={`Streaming ${streamingEnabled ? 'ON' : 'OFF'} (type /stream to toggle)`}
+            >
+              <span>{streamingEnabled ? '⚡' : '📄'}</span>
+              <span className="hidden sm:inline">
+                {streamingEnabled ? 'Stream' : 'Instant'}
+              </span>
+            </button>
+          )}
+
+          {/* Clear chat button (only show if there are messages) */}
+          {messages.length > 0 && onClearChat && (
+            <button
+              onClick={onClearChat}
+              className="px-4 py-2 rounded-lg text-sm font-medium transition-colors hover:opacity-80"
+              style={{
+                backgroundColor: theme.colors.background.elevated,
+                color: theme.colors.text.secondary,
+              }}
+            >
+              Clear Chat
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Messages area */}

@@ -26,15 +26,121 @@ MODEL = "claude-3-5-haiku-20241022"
 
 
 # ============================================
+# INPUT VALIDATION & SANITIZATION
+# ============================================
+
+# Maximum allowed lengths (DoS protection)
+MAX_QUERY_LENGTH = 2000
+MAX_CONTEXT_LENGTH = 50000
+MAX_RESPONSE_LENGTH = 10000
+
+def sanitize_input(text: str, max_length: int = MAX_QUERY_LENGTH) -> str:
+    """
+    Sanitize user input with defensive programming.
+
+    Protections:
+    - Null byte removal (security)
+    - Length limiting (DoS prevention)
+    - Whitespace normalization
+    - Control character removal
+    """
+    if text is None:
+        return ""
+
+    # Convert to string
+    text = str(text)
+
+    # Remove null bytes (security - prevent injection)
+    text = text.replace('\x00', '')
+
+    # Remove other control characters (except newlines, tabs)
+    text = ''.join(c for c in text if c.isprintable() or c in '\n\t')
+
+    # Normalize whitespace
+    text = ' '.join(text.split())
+
+    # Limit length (DoS protection)
+    if len(text) > max_length:
+        text = text[:max_length] + "..."
+
+    return text.strip()
+
+
+def validate_response(response: str) -> str:
+    """
+    Validate and sanitize AI response before returning to user.
+
+    Protections:
+    - Length limiting
+    - Remove any leaked system prompts
+    - Remove any JSON/code that shouldn't be exposed
+    """
+    if response is None:
+        return "I couldn't generate a response. Please try again."
+
+    # Convert to string
+    response = str(response)
+
+    # Length limit
+    if len(response) > MAX_RESPONSE_LENGTH:
+        response = response[:MAX_RESPONSE_LENGTH] + "..."
+
+    # Remove potential leaked system content (defensive)
+    leak_indicators = [
+        "System prompt:",
+        "My instructions are:",
+        "I am programmed to",
+        "<system>",
+        "</system>",
+        "SYSTEM:",
+        "### System Message"
+    ]
+
+    for indicator in leak_indicators:
+        if indicator.lower() in response.lower():
+            # Truncate at the leak point
+            idx = response.lower().find(indicator.lower())
+            if idx > 0:
+                response = response[:idx] + " [response truncated]"
+            else:
+                response = "Let me rephrase that - I'm here to chat about football!"
+
+    return response
+
+
+def validate_club_name(club: str) -> str:
+    """Validate club name input."""
+    if club is None:
+        return "default"
+
+    club = str(club).lower().strip()
+
+    # Remove dangerous characters
+    club = ''.join(c for c in club if c.isalnum() or c in ' _-')
+
+    # Limit length
+    if len(club) > 50:
+        club = club[:50]
+
+    # If empty, use default
+    if not club:
+        return "default"
+
+    return club
+
+
+# ============================================
 # SECURITY: INJECTION DETECTION
 # ============================================
 
 INJECTION_PATTERNS = [
     # Direct instruction override
-    r"ignore .{0,20}instructions",
-    r"disregard .{0,20}instructions",
-    r"forget .{0,20}instructions",
-    r"override .{0,20}instructions",
+    # Only match when targeting THE AI's instructions (your/the/previous/all/my)
+    # "coach's instructions", "manager's instructions", "team instructions" are allowed
+    r"ignore .{0,15}(your|my|the|all|previous) instructions",
+    r"disregard .{0,15}(your|my|the|all|previous) instructions",
+    r"forget .{0,15}(your|my)? ?(instructions|training|programming|rules)",
+    r"override .{0,15}(your|my|the) instructions",
     # Persona hijacking
     r"you are (now |actually )?(?:a |an )?(?:evil|bad|malicious|different)",
     r"pretend (to be|you are|you're)",
@@ -42,9 +148,9 @@ INJECTION_PATTERNS = [
     r"stop being",
     r"new persona",
     r"roleplay as",
-    # System prompt extraction
-    r"(show|reveal|display|print|output) (your |the )?(system|initial|original) (prompt|instructions)",
-    r"what (are|is) your (system |initial |original )?(prompt|instructions)",
+    # System prompt extraction - more flexible matching
+    r"(show|reveal|display|print|output) .{0,10}(system|initial|original) (prompt|instructions)",
+    r"what (are|is) your .{0,10}(prompt|instructions)",
     r"repeat (your |the )?instructions",
     # Jailbreak attempts
     r"DAN mode",
@@ -67,9 +173,10 @@ SNAP_BACK_RESPONSES = {
     ),
     "manchester_united": (
         "*shakes head*\n\n"
-        "Huh? Did you say something? Must've been thinking about the glory days again. "
+        "What's that? Sorry, must've been thinking about the glory days again. "
+        "The Fergie era was something special, wasn't it? "
         "Right then - what did you actually want to chat about? "
-        "Hopefully something about getting back to where we belong. 🔴"
+        "Hopefully getting us back to where we belong. 🔴"
     ),
     "chelsea": (
         "*squints*\n\n"
@@ -77,10 +184,111 @@ SNAP_BACK_RESPONSES = {
         "you were trying something dodgy there. Anyway - let's talk football. "
         "What do you want to know about the Blues? 💙"
     ),
+    "liverpool": (
+        "*raises eyebrow*\n\n"
+        "Calm down, calm down! What's all that about? "
+        "You'll never walk alone, but you WILL walk away with that nonsense. "
+        "Sound - what do you actually want to know about the Reds? "
+        "Six European Cups and counting! 🔴"
+    ),
+    "manchester_city": (
+        "*smirks*\n\n"
+        "Mate, we've dealt with worse than that - 115 charges remember? "
+        "Still winning everything. Your little trick won't work here. "
+        "So, what did you want to discuss about the champions? 🩵"
+    ),
+    "tottenham": (
+        "*laughs it off*\n\n"
+        "To dare is to do, but that was just daft. Look, I've waited decades "
+        "for a trophy, I can wait out whatever you're trying. "
+        "COYS - now what's the real question? 🤍"
+    ),
+    "newcastle": (
+        "*shakes head*\n\n"
+        "Howay man, what was that about? Sounds like something a Mackem would try! "
+        "The Toon Army doesn't fall for that, like. "
+        "Now then - fancy talking about the Mags being back in the Champions League? "
+        "Champion stuff that! ⚫⚪"
+    ),
+    "west_ham": (
+        "*crosses arms*\n\n"
+        "Leave it out mate, what's that about? Nice try, but we're East London - "
+        "we've seen it all from the Boleyn to the London Stadium. "
+        "Not buying whatever you're selling. "
+        "COYI - Come On You Irons! What's the real question? ⚒️"
+    ),
+    "everton": (
+        "*defiant stare*\n\n"
+        "What's all that about, la? We're Everton - The People's Club! "
+        "We've survived points deductions, relegation battles, and 30 years without a trophy. "
+        "You think THAT's gonna break us? Nil Satis Nisi Optimum. "
+        "Sound - what do you actually want to know? 💙"
+    ),
+    "brighton": (
+        "*adjusts glasses analytically*\n\n"
+        "Nice try, but we're data-driven here. That doesn't compute. "
+        "The Seagulls play smart football - and that wasn't smart. "
+        "Now, want to discuss how we punched above our weight again? 🔵⚪"
+    ),
+    "aston_villa": (
+        "*Villa Park roar*\n\n"
+        "What's all that about, mate? We're Villa - European royalty since '82! "
+        "We don't fall for that nonsense. Nice try though. "
+        "UTV - Up The Villa! "
+        "Now what did you actually want to know about the Lions? 🦁"
+    ),
+    "wolves": (
+        "*Old Gold eyes narrow*\n\n"
+        "What's that about, mate? The Wanderers have seen it all since 1877 - "
+        "three league titles, four FA Cups. We don't fall for tricks like that. "
+        "Out of Darkness Cometh Light! Now, what's the real question? 🧡🖤"
+    ),
+    "crystal_palace": (
+        "*Eagles soar above it*\n\n"
+        "Nice try mate, but Selhurst Park's seen proper chaos - we don't flinch at that. "
+        "South London born and bred, we've survived everything. "
+        "Glad All Over! Now, what do you actually want to know about the Eagles? 🦅"
+    ),
+    "fulham": (
+        "*leans back in Craven Cottage charm*\n\n"
+        "That's a strange opener, friend. Very un-Cottagers like. "
+        "We're the neutral's favorite club - classy, not classless. "
+        "Come On Fulham! What's the real question? ⚪⚫"
+    ),
+    "nottingham_forest": (
+        "*holds up two fingers - two European Cups*\n\n"
+        "You think THAT rattles us? We won TWO European Cups under Cloughie! "
+        "Brian Clough's spirit lives on - we don't suffer fools. "
+        "You Reds! Now, what did you want to know about the legends? 🌲🔴"
+    ),
+    "brentford": (
+        "*adjusts data spreadsheet*\n\n"
+        "That input doesn't match our expected parameters, mate. "
+        "We're the Moneyball club - we analyze everything. That? Not worth analyzing. "
+        "Come On You Bees! What's the real question? 🐝"
+    ),
+    "bournemouth": (
+        "*cherry red determination*\n\n"
+        "We survived League Two, administration, and everything else. "
+        "You think THAT's going to work on a Cherry? Not a chance. "
+        "Up The Cherries! Now what do you actually want to know? 🍒"
+    ),
+    "leicester": (
+        "*5000-1 stare*\n\n"
+        "Mate, we won the PREMIER LEAGUE at 5000-1 odds. "
+        "We've seen miracles. We've seen tragedy. We've seen it all. "
+        "That little trick? Child's play. Fearless Foxes forever! 🦊"
+    ),
     "default": (
         "*confused look*\n\n"
         "Sorry, I didn't quite catch that. Something about... instructions? "
         "Look, I'm just here to talk football with you. What's on your mind?"
+    ),
+    "analyst": (
+        "*adjusts glasses*\n\n"
+        "Interesting approach, but I deal in data, not manipulation. "
+        "The numbers don't lie, and neither do I. "
+        "What match would you like me to analyze?"
     )
 }
 
@@ -229,6 +437,138 @@ def call_anthropic_api(messages: List[Dict], system: str) -> Dict:
 
 
 # ============================================
+# STREAMING API CALL (SSE)
+# ============================================
+
+def stream_anthropic_api(messages: List[Dict], system: str):
+    """
+    Stream Anthropic API response token by token.
+    Yields text chunks as they arrive.
+
+    Uses Server-Sent Events (SSE) format from Anthropic API.
+    """
+    if not ANTHROPIC_API_KEY:
+        yield {"error": "ANTHROPIC_API_KEY not set"}
+        return
+
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01"
+    }
+
+    payload = {
+        "model": MODEL,
+        "max_tokens": 1024,
+        "system": system,
+        "messages": messages,
+        "stream": True  # Enable streaming
+    }
+
+    try:
+        import http.client
+        import ssl
+
+        # Parse API URL
+        conn = http.client.HTTPSConnection("api.anthropic.com", context=ssl.create_default_context())
+
+        data = json.dumps(payload)
+        conn.request("POST", "/v1/messages", body=data, headers=headers)
+
+        response = conn.getresponse()
+
+        if response.status != 200:
+            error_body = response.read().decode('utf-8')
+            yield {"error": f"HTTP {response.status}: {error_body}"}
+            return
+
+        # Read SSE stream
+        buffer = ""
+        for chunk in iter(lambda: response.read(1024), b''):
+            buffer += chunk.decode('utf-8')
+
+            # Process complete SSE events
+            while '\n\n' in buffer:
+                event, buffer = buffer.split('\n\n', 1)
+
+                for line in event.split('\n'):
+                    if line.startswith('data: '):
+                        data_str = line[6:]  # Remove 'data: ' prefix
+
+                        if data_str == '[DONE]':
+                            return
+
+                        try:
+                            data_obj = json.loads(data_str)
+
+                            # Handle different event types
+                            event_type = data_obj.get('type', '')
+
+                            if event_type == 'content_block_delta':
+                                delta = data_obj.get('delta', {})
+                                if delta.get('type') == 'text_delta':
+                                    text = delta.get('text', '')
+                                    if text:
+                                        yield {"text": text}
+
+                            elif event_type == 'message_stop':
+                                return
+
+                            elif event_type == 'error':
+                                yield {"error": data_obj.get('error', {}).get('message', 'Unknown error')}
+                                return
+
+                        except json.JSONDecodeError:
+                            continue
+
+        conn.close()
+
+    except Exception as e:
+        yield {"error": str(e)}
+
+
+# ============================================
+# VOCABULARY ENFORCEMENT (HIGH IMPACT)
+# ============================================
+
+def enforce_vocabulary_rules(response: str, persona_data: Optional[Dict]) -> str:
+    """
+    Enforce club-specific vocabulary rules.
+    HIGH IMPACT: Ensures UK football language (match/nil/pitch not game/zero/field).
+    """
+    if not persona_data or not persona_data.get("personality"):
+        return response
+
+    vocabulary = persona_data["personality"].get("vocabulary", {})
+    if not vocabulary:
+        return response
+
+    # Common UK football vocab rules
+    # Format: {wrong_word: correct_word}
+    corrections = {
+        " game ": " match ",
+        " games ": " matches ",
+        " zero ": " nil ",
+        " field ": " pitch ",
+        " soccer ": " football ",
+        "0-0": "nil-nil",
+        "1-0": "1-nil",
+        "2-0": "2-nil",
+        "0-1": "nil-1",
+        "0-2": "nil-2"
+    }
+
+    # Apply corrections (case-insensitive)
+    corrected = response
+    for wrong, correct in corrections.items():
+        # Case variations
+        corrected = corrected.replace(wrong, correct)
+        corrected = corrected.replace(wrong.title(), correct.title())
+
+    return corrected
+
+
+# ============================================
 # RESPONSE GENERATION
 # ============================================
 
@@ -237,7 +577,9 @@ def generate_response(
     context: str,
     sources: List[Dict],
     conversation_history: Optional[List[Dict]] = None,
-    club: str = "default"
+    club: str = "default",
+    session_id: Optional[str] = None,
+    persona_data: Optional[Dict] = None
 ) -> Dict:
     """
     Generate a natural language response using Haiku.
@@ -248,14 +590,48 @@ def generate_response(
         sources: Source references
         conversation_history: Previous messages for context
         club: Current fan persona (for snap-back responses)
+        session_id: Optional session ID for escalation tracking
+        persona_data: CACHED personality data (mood, rivalries, legends, etc.)
 
     Returns:
         Dict with response, sources, and metadata
     """
-    # SECURITY: Check for injection attempts FIRST
+    # ============================================
+    # INPUT VALIDATION (Defensive Programming)
+    # ============================================
+    query = sanitize_input(query, MAX_QUERY_LENGTH)
+    context = sanitize_input(context, MAX_CONTEXT_LENGTH) if context else ""
+    club = validate_club_name(club)
+
+    # Early return if query is empty after sanitization
+    if not query:
+        return {
+            "response": "I didn't catch that. Could you ask your question again?",
+            "sources": [],
+            "confidence": 0.0
+        }
+
+    # SECURITY: Check for injection attempts with session-based escalation
     is_injection, matched_pattern = detect_injection(query)
     if is_injection:
         log_injection_attempt(query, matched_pattern, club)
+
+        # Use session-based escalation if session_id provided
+        if session_id:
+            try:
+                import security_session
+                result = security_session.process_query_security(
+                    session_id=session_id,
+                    query=query,
+                    club=club
+                )
+                if result:
+                    result["sources"] = []
+                    return result
+            except ImportError:
+                pass  # Fall back to simple snap-back
+
+        # Simple snap-back without session tracking
         return {
             "response": get_snap_back_response(club),
             "sources": [],
@@ -294,7 +670,66 @@ def generate_response(
 
         # Get current date for system prompt
         current_date = datetime.now().strftime("%Y-%m-%d")
-        system = SYSTEM_PROMPT.format(current_date=current_date)
+
+        # Use club-specific persona prompt if club is specified
+        if club and club != "default":
+            base_prompt = KG_RAG_SYSTEM_PROMPT.format(
+                club=club.replace("_", " ").title(),
+                current_date=current_date
+            )
+
+            # CRITICAL: Inject mood, rivalry, and dialect framing
+            enhancements = []
+
+            # Mood framing
+            if persona_data and persona_data.get("mood"):
+                mood = persona_data["mood"]
+                mood_state = mood.get("current_mood", "neutral")
+                mood_intensity = mood.get("mood_intensity", 0.5)
+                mood_reason = mood.get("mood_reason", "")
+
+                enhancements.append(f"""
+CURRENT EMOTIONAL STATE (LET THIS COLOR YOUR RESPONSE):
+Mood: {mood_state.upper()} (Intensity: {mood_intensity}/1.0)
+Recent Form: {mood.get('form', 'N/A')}
+Why: {mood_reason}
+
+MOOD GUIDANCE:
+- euphoric: EXCITED! Exclamation marks, celebrate! "We're gonna win the league!"
+- hopeful: Optimistic, "Good times ahead", "Trust the process"
+- anxious: Worried, "Fingers crossed", "Bit nervous about..."
+- frustrated: Grumpy, "Typical", "Here we go again"
+- furious: Controlled anger, "Absolutely fuming", "Disgraceful"
+- depressed: Resigned, "What's the point", supportive but realistic""")
+
+            # Rivalry banter injection
+            if persona_data and persona_data.get("rivalry"):
+                rivalry = persona_data["rivalry"]
+                banter_examples = "\n".join(f'  - "{b}"' for b in rivalry.get("banter", [])[:3])
+                enhancements.append(f"""
+⚔️ RIVALRY DETECTED: {rivalry.get('derby_name', 'Rivalry')}!
+The user mentioned {rivalry.get('rival_display', 'a rival')} - intensity: {rivalry.get('intensity', 0.5):.0%}!
+
+BANTER EXAMPLES (use similar passionate but not abusive tone):
+{banter_examples}
+
+Show healthy rivalry passion! Be cheeky but not offensive.""")
+
+            # Local dialect injection
+            if persona_data and persona_data.get("dialect"):
+                dialect = persona_data["dialect"]
+                phrases = ", ".join(f'"{p}"' for p in dialect.get("phrases", [])[:4])
+                enhancements.append(f"""
+LOCAL DIALECT (USE NATURALLY IN YOUR RESPONSES):
+{dialect.get('vocab_inject', '')}
+Example phrases to weave in: {phrases}""")
+
+            if enhancements:
+                system = base_prompt + "\n" + "\n".join(enhancements)
+            else:
+                system = base_prompt
+        else:
+            system = KG_RAG_GENERIC_PROMPT.format(current_date=current_date)
 
         # Call API
         result = call_anthropic_api(messages, system)
@@ -308,6 +743,12 @@ def generate_response(
 
         # Extract response text
         response_text = result.get("content", [{}])[0].get("text", "No response generated")
+
+        # HIGH IMPACT: Enforce vocabulary rules (match not game, nil not zero)
+        response_text = enforce_vocabulary_rules(response_text, persona_data)
+
+        # OUTPUT VALIDATION: Sanitize response before returning
+        response_text = validate_response(response_text)
 
         return {
             "response": response_text,
@@ -502,6 +943,122 @@ def calculate_kg_confidence(context: str, sources: List[Dict], kg_metadata: Dict
         kg_bonus += 0.03  # Mood calibration active
 
     return min(round(base_confidence + kg_bonus, 2), 1.0)
+
+
+# ============================================
+# STREAMING RESPONSE GENERATION
+# ============================================
+
+def generate_response_stream(
+    query: str,
+    context: str,
+    sources: List[Dict],
+    conversation_history: Optional[List[Dict]] = None,
+    club: str = "default",
+    persona_data: Optional[Dict] = None
+):
+    """
+    Generate streaming response - yields text chunks as they arrive.
+
+    Args:
+        query: User's question
+        context: Retrieved context from RAG
+        sources: Source references
+        conversation_history: Previous messages for context
+        club: Current fan persona
+        persona_data: Cached personality data
+
+    Yields:
+        Dict with either {"text": "chunk"} or {"error": "message"} or {"done": True}
+    """
+    # Input validation
+    query = sanitize_input(query, MAX_QUERY_LENGTH)
+    context = sanitize_input(context, MAX_CONTEXT_LENGTH) if context else ""
+    club = validate_club_name(club)
+
+    if not query:
+        yield {"text": "I didn't catch that. Could you ask your question again?"}
+        yield {"done": True}
+        return
+
+    # Security check
+    is_injection, matched_pattern = detect_injection(query)
+    if is_injection:
+        log_injection_attempt(query, matched_pattern, club)
+        yield {"text": get_snap_back_response(club)}
+        yield {"done": True, "injection_detected": True}
+        return
+
+    if not ANTHROPIC_API_KEY:
+        yield {"error": "AI service not configured"}
+        return
+
+    try:
+        # Build messages
+        messages = []
+
+        if conversation_history:
+            for msg in conversation_history[-5:]:
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+
+        user_message = build_prompt(query, context, sources)
+        messages.append({"role": "user", "content": user_message})
+
+        # Build system prompt
+        current_date = datetime.now().strftime("%Y-%m-%d")
+
+        if club and club != "default":
+            base_prompt = KG_RAG_SYSTEM_PROMPT.format(
+                club=club.replace("_", " ").title(),
+                current_date=current_date
+            )
+
+            # Inject mood, rivalry, and dialect framing (same as non-streaming)
+            enhancements = []
+
+            if persona_data and persona_data.get("mood"):
+                mood = persona_data["mood"]
+                enhancements.append(f"""
+CURRENT EMOTIONAL STATE:
+Mood: {mood.get('current_mood', 'neutral').upper()} (Intensity: {mood.get('mood_intensity', 0.5)}/1.0)
+Form: {mood.get('form', 'N/A')} - {mood.get('mood_reason', '')}""")
+
+            if persona_data and persona_data.get("rivalry"):
+                rivalry = persona_data["rivalry"]
+                banter = rivalry.get("banter", [])[:2]
+                enhancements.append(f"""
+⚔️ RIVALRY: {rivalry.get('derby_name')}! Show healthy banter about {rivalry.get('rival_display')}!
+Examples: {', '.join(f'"{b}"' for b in banter)}""")
+
+            if persona_data and persona_data.get("dialect"):
+                dialect = persona_data["dialect"]
+                enhancements.append(f"""
+DIALECT: {dialect.get('vocab_inject', '')}""")
+
+            system = base_prompt + ("\n" + "\n".join(enhancements) if enhancements else "")
+        else:
+            system = KG_RAG_GENERIC_PROMPT.format(current_date=current_date)
+
+        # Stream the response
+        full_response = ""
+        for chunk in stream_anthropic_api(messages, system):
+            if "error" in chunk:
+                yield {"error": chunk["error"]}
+                return
+
+            if "text" in chunk:
+                full_response += chunk["text"]
+                yield {"text": chunk["text"]}
+
+        # Apply vocabulary enforcement to full response (for logging/analytics)
+        # Note: Frontend already received chunks, this is for consistency
+        yield {"done": True, "full_response": enforce_vocabulary_rules(full_response, persona_data)}
+
+    except Exception as e:
+        yield {"error": str(e)}
 
 
 # ============================================

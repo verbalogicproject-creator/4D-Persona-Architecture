@@ -662,6 +662,30 @@ def get_club_mood(team_id: int) -> Optional[Dict]:
         return dict_from_row(cursor.fetchone())
 
 
+def get_club_legends(team_id: int, limit: int = 10) -> List[Dict]:
+    """Get legends for a specific club."""
+    with get_connection() as conn:
+        cursor = conn.execute("""
+            SELECT l.*, t.name as team_name
+            FROM club_legends l
+            LEFT JOIN teams t ON l.team_id = t.id
+            WHERE l.team_id = ?
+            ORDER BY l.id
+            LIMIT ?
+        """, (team_id, limit))
+        results = []
+        for row in cursor.fetchall():
+            result = dict_from_row(row)
+            # Parse achievements JSON if present
+            if result.get('achievements'):
+                try:
+                    result['achievements'] = json.loads(result['achievements'])
+                except:
+                    pass
+            results.append(result)
+        return results
+
+
 def search_legends(query: str, limit: int = 10) -> List[Dict]:
     """Search legends by name or story content."""
     with get_connection() as conn:
@@ -675,6 +699,31 @@ def search_legends(query: str, limit: int = 10) -> List[Dict]:
             LIMIT ?
         """, (f"%{query}%", f"%{query}%", f"%{query}%", limit))
         return [dict_from_row(row) for row in cursor.fetchall()]
+
+
+def load_full_persona(team_id: int) -> Dict:
+    """
+    Load complete persona data for a team.
+
+    CRITICAL: This should be called once when user selects a club
+    and cached for the entire conversation session.
+
+    Returns:
+        Dictionary with all personality components:
+        - personality: Club identity (nickname, motto, values, vocabulary, forbidden topics)
+        - mood: Current emotional state (euphoric/hopeful/anxious/depressed/furious)
+        - rivalries: Who they hate and why
+        - legends: Club heroes and their stories
+        - moments: Defining historical moments
+    """
+    return {
+        "team_id": team_id,
+        "personality": get_club_identity(team_id),
+        "mood": get_club_mood(team_id),
+        "rivalries": get_club_rivalries(team_id),
+        "legends": get_club_legends(team_id, limit=10),
+        "moments": get_club_moments(team_id, limit=10)
+    }
 
 
 # ============================================
@@ -1412,6 +1461,482 @@ def get_db_stats() -> Dict:
             stats[table] = cursor.fetchone()['count']
 
         return stats
+
+
+# ============================================
+# IMPLEMENTATION GAP TRACKER (Meta-Tool)
+# ============================================
+
+def init_gap_tracker():
+    """Initialize gap tracker table."""
+    with get_connection() as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS implementation_gaps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                feature_name TEXT NOT NULL,
+                source_doc TEXT,
+                source_line INTEGER,
+                status TEXT DEFAULT 'pending',
+                priority TEXT DEFAULT 'medium',
+                assigned_phase TEXT,
+                completed_at DATETIME,
+                notes TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+
+
+def add_implementation_gap(
+    feature_name: str,
+    source_doc: str = None,
+    source_line: int = None,
+    priority: str = 'medium',
+    assigned_phase: str = None,
+    notes: str = None
+) -> int:
+    """Add a new implementation gap."""
+    with get_connection() as conn:
+        cursor = conn.execute('''
+            INSERT INTO implementation_gaps
+            (feature_name, source_doc, source_line, priority, assigned_phase, notes)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (feature_name, source_doc, source_line, priority, assigned_phase, notes))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def update_gap_status(gap_id: int, status: str, notes: str = None):
+    """Update implementation gap status."""
+    with get_connection() as conn:
+        if status == 'completed':
+            conn.execute('''
+                UPDATE implementation_gaps
+                SET status = ?, notes = COALESCE(?, notes), completed_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (status, notes, gap_id))
+        else:
+            conn.execute('''
+                UPDATE implementation_gaps
+                SET status = ?, notes = COALESCE(?, notes)
+                WHERE id = ?
+            ''', (status, notes, gap_id))
+        conn.commit()
+
+
+def get_implementation_gaps(status: str = None, priority: str = None) -> List[Dict]:
+    """Get implementation gaps with optional filtering."""
+    with get_connection() as conn:
+        query = "SELECT * FROM implementation_gaps WHERE 1=1"
+        params = []
+
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        if priority:
+            query += " AND priority = ?"
+            params.append(priority)
+
+        query += " ORDER BY CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at"
+
+        cursor = conn.execute(query, params)
+        return [dict_from_row(row) for row in cursor.fetchall()]
+
+
+def get_gap_summary() -> Dict:
+    """Get summary of implementation gaps."""
+    with get_connection() as conn:
+        total = conn.execute("SELECT COUNT(*) as count FROM implementation_gaps").fetchone()['count']
+        by_status = {}
+        cursor = conn.execute("SELECT status, COUNT(*) as count FROM implementation_gaps GROUP BY status")
+        for row in cursor.fetchall():
+            by_status[row['status']] = row['count']
+        by_priority = {}
+        cursor = conn.execute("SELECT priority, COUNT(*) as count FROM implementation_gaps GROUP BY priority")
+        for row in cursor.fetchall():
+            by_priority[row['priority']] = row['count']
+
+        return {
+            'total': total,
+            'by_status': by_status,
+            'by_priority': by_priority,
+            'completion_rate': by_status.get('completed', 0) / total if total > 0 else 0
+        }
+
+
+# ============================================
+# SECURITY SESSION MANAGEMENT
+# ============================================
+
+def init_security_tables():
+    """Initialize security tables."""
+    with get_connection() as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS session_state (
+                session_id TEXT PRIMARY KEY,
+                state TEXT DEFAULT 'normal',
+                injection_count INTEGER DEFAULT 0,
+                clean_query_count INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                last_activity DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS security_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                attempt_number INTEGER,
+                query_hash TEXT,
+                pattern_matched TEXT,
+                escalation_level TEXT,
+                response_type TEXT
+            )
+        ''')
+        conn.commit()
+
+
+def get_session_state(session_id: str) -> Optional[Dict]:
+    """Get security session state."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM session_state WHERE session_id = ?",
+            (session_id,)
+        )
+        return dict_from_row(cursor.fetchone())
+
+
+def create_session_state(session_id: str) -> Dict:
+    """Create new session state."""
+    with get_connection() as conn:
+        conn.execute('''
+            INSERT OR REPLACE INTO session_state
+            (session_id, state, injection_count, clean_query_count, created_at, last_activity)
+            VALUES (?, 'normal', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ''', (session_id,))
+        conn.commit()
+    return get_session_state(session_id)
+
+
+def update_session_state(
+    session_id: str,
+    state: str = None,
+    injection_count: int = None,
+    clean_query_count: int = None
+):
+    """Update session state."""
+    with get_connection() as conn:
+        updates = ["last_activity = CURRENT_TIMESTAMP"]
+        params = []
+
+        if state is not None:
+            updates.append("state = ?")
+            params.append(state)
+        if injection_count is not None:
+            updates.append("injection_count = ?")
+            params.append(injection_count)
+        if clean_query_count is not None:
+            updates.append("clean_query_count = ?")
+            params.append(clean_query_count)
+
+        params.append(session_id)
+        conn.execute(f'''
+            UPDATE session_state
+            SET {", ".join(updates)}
+            WHERE session_id = ?
+        ''', params)
+        conn.commit()
+
+
+def log_security_event(
+    session_id: str,
+    attempt_number: int,
+    query_hash: str,
+    pattern_matched: str,
+    escalation_level: str,
+    response_type: str
+):
+    """Log a security event."""
+    with get_connection() as conn:
+        conn.execute('''
+            INSERT INTO security_log
+            (session_id, attempt_number, query_hash, pattern_matched, escalation_level, response_type)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (session_id, attempt_number, query_hash, pattern_matched, escalation_level, response_type))
+        conn.commit()
+
+
+def get_security_metrics(days: int = 7) -> Dict:
+    """Get security metrics."""
+    with get_connection() as conn:
+        total_attempts = conn.execute('''
+            SELECT COUNT(*) as count FROM security_log
+            WHERE timestamp >= datetime('now', ?)
+        ''', (f'-{days} days',)).fetchone()['count']
+
+        by_level = {}
+        cursor = conn.execute('''
+            SELECT escalation_level, COUNT(*) as count
+            FROM security_log
+            WHERE timestamp >= datetime('now', ?)
+            GROUP BY escalation_level
+        ''', (f'-{days} days',))
+        for row in cursor.fetchall():
+            by_level[row['escalation_level'] or 'normal'] = row['count']
+
+        active_sessions = conn.execute('''
+            SELECT COUNT(*) as count FROM session_state
+            WHERE last_activity >= datetime('now', '-1 hour')
+        ''').fetchone()['count']
+
+        escalated_sessions = conn.execute('''
+            SELECT COUNT(*) as count FROM session_state
+            WHERE state IN ('warned', 'cautious', 'escalated')
+        ''').fetchone()['count']
+
+        return {
+            'period_days': days,
+            'total_injection_attempts': total_attempts,
+            'by_escalation_level': by_level,
+            'active_sessions_1h': active_sessions,
+            'escalated_sessions': escalated_sessions
+        }
+
+
+# ============================================
+# LIVE MOOD AUTO-UPDATE
+# ============================================
+
+def update_mood_after_match(
+    team_id: int,
+    result: str,  # 'W', 'D', 'L'
+    is_derby: bool = False,
+    rival_lost: bool = False
+) -> Optional[Dict]:
+    """
+    Auto-update mood after match result.
+    W = +0.2, D = 0, L = -0.2
+    Derby W = +0.4
+    Rival L = +0.1
+    Clamped to 0.1-1.0
+    """
+    with get_connection() as conn:
+        # Get current mood
+        cursor = conn.execute(
+            "SELECT * FROM club_mood WHERE team_id = ?",
+            (team_id,)
+        )
+        current = cursor.fetchone()
+        if not current:
+            return None
+
+        current_intensity = current['mood_intensity'] or 0.5
+
+        # Calculate adjustment
+        adjustment = 0.0
+        if result == 'W':
+            adjustment = 0.4 if is_derby else 0.2
+        elif result == 'L':
+            adjustment = -0.2
+        # D = 0
+
+        if rival_lost:
+            adjustment += 0.1
+
+        # Apply and clamp
+        new_intensity = max(0.1, min(1.0, current_intensity + adjustment))
+
+        # Determine new mood based on intensity
+        if new_intensity >= 0.8:
+            new_mood = 'euphoric'
+        elif new_intensity >= 0.65:
+            new_mood = 'optimistic'
+        elif new_intensity >= 0.5:
+            new_mood = 'steady'
+        elif new_intensity >= 0.35:
+            new_mood = 'anxious'
+        else:
+            new_mood = 'frustrated'
+
+        # Update
+        conn.execute('''
+            UPDATE club_mood
+            SET current_mood = ?, mood_intensity = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE team_id = ?
+        ''', (new_mood, new_intensity, team_id))
+        conn.commit()
+
+        return get_club_mood(team_id)
+
+
+# ============================================
+# TRIVIA SYSTEM
+# ============================================
+
+def init_trivia_table():
+    """Initialize trivia table."""
+    with get_connection() as conn:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS trivia_questions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_id INTEGER REFERENCES teams(id),
+                category TEXT,
+                difficulty TEXT DEFAULT 'medium',
+                question TEXT NOT NULL,
+                correct_answer TEXT NOT NULL,
+                wrong_answers TEXT,
+                explanation TEXT,
+                times_asked INTEGER DEFAULT 0,
+                times_correct INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+
+
+def add_trivia_question(
+    question: str,
+    correct_answer: str,
+    wrong_answers: List[str],
+    team_id: int = None,
+    category: str = 'general',
+    difficulty: str = 'medium',
+    explanation: str = None
+) -> int:
+    """Add a trivia question."""
+    with get_connection() as conn:
+        cursor = conn.execute('''
+            INSERT INTO trivia_questions
+            (team_id, category, difficulty, question, correct_answer, wrong_answers, explanation)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (team_id, category, difficulty, question, correct_answer, json.dumps(wrong_answers), explanation))
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_trivia_question(
+    team_id: int = None,
+    category: str = None,
+    difficulty: str = None
+) -> Optional[Dict]:
+    """Get a random trivia question."""
+    with get_connection() as conn:
+        query = "SELECT * FROM trivia_questions WHERE 1=1"
+        params = []
+
+        if team_id:
+            query += " AND team_id = ?"
+            params.append(team_id)
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        if difficulty:
+            query += " AND difficulty = ?"
+            params.append(difficulty)
+
+        query += " ORDER BY RANDOM() LIMIT 1"
+
+        cursor = conn.execute(query, params)
+        row = cursor.fetchone()
+        if row:
+            result = dict_from_row(row)
+            if result.get('wrong_answers'):
+                result['wrong_answers'] = json.loads(result['wrong_answers'])
+            return result
+        return None
+
+
+def check_trivia_answer(question_id: int, answer: str) -> Dict:
+    """Check if trivia answer is correct and update stats."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM trivia_questions WHERE id = ?",
+            (question_id,)
+        )
+        question = cursor.fetchone()
+        if not question:
+            return {"error": "Question not found"}
+
+        is_correct = answer.lower().strip() == question['correct_answer'].lower().strip()
+
+        # Update stats
+        conn.execute('''
+            UPDATE trivia_questions
+            SET times_asked = times_asked + 1,
+                times_correct = times_correct + ?
+            WHERE id = ?
+        ''', (1 if is_correct else 0, question_id))
+        conn.commit()
+
+        return {
+            "correct": is_correct,
+            "correct_answer": question['correct_answer'],
+            "explanation": question['explanation'],
+            "your_answer": answer
+        }
+
+
+def get_trivia_stats(team_id: int = None) -> Dict:
+    """Get trivia statistics."""
+    with get_connection() as conn:
+        query = "SELECT COUNT(*) as total FROM trivia_questions"
+        params = []
+        if team_id:
+            query += " WHERE team_id = ?"
+            params.append(team_id)
+
+        total = conn.execute(query, params).fetchone()['total']
+
+        by_category = {}
+        cat_query = "SELECT category, COUNT(*) as count FROM trivia_questions"
+        if team_id:
+            cat_query += " WHERE team_id = ?"
+        cat_query += " GROUP BY category"
+
+        cursor = conn.execute(cat_query, params)
+        for row in cursor.fetchall():
+            by_category[row['category'] or 'general'] = row['count']
+
+        by_difficulty = {}
+        diff_query = "SELECT difficulty, COUNT(*) as count FROM trivia_questions"
+        if team_id:
+            diff_query += " WHERE team_id = ?"
+        diff_query += " GROUP BY difficulty"
+
+        cursor = conn.execute(diff_query, params)
+        for row in cursor.fetchall():
+            by_difficulty[row['difficulty'] or 'medium'] = row['count']
+
+        return {
+            'total_questions': total,
+            'by_category': by_category,
+            'by_difficulty': by_difficulty
+        }
+
+
+# ============================================
+# ON THIS DAY FEATURE
+# ============================================
+
+def get_moments_on_this_day(month_day: str = None) -> List[Dict]:
+    """
+    Get club moments that happened on this day in history.
+    Args:
+        month_day: MM-DD format, defaults to today
+    """
+    if month_day is None:
+        month_day = datetime.now().strftime("%m-%d")
+
+    with get_connection() as conn:
+        # Match moments where date contains the month-day
+        cursor = conn.execute('''
+            SELECT cm.*, t.name as team_name
+            FROM club_moments cm
+            JOIN teams t ON cm.team_id = t.id
+            WHERE substr(cm.date, 6, 5) = ?
+            ORDER BY cm.date DESC
+        ''', (month_day,))
+        return [dict_from_row(row) for row in cursor.fetchall()]
 
 
 if __name__ == "__main__":

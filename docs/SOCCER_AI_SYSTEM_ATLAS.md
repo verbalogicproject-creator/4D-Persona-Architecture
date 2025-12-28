@@ -230,60 +230,256 @@ mindmap
         rival_of
 ```
 
-## Security Flow
+## Security Flow (Session-Based Escalation)
 
 ```mermaid
 stateDiagram-v2
-    [*] --> CLEAN: User Query
-    CLEAN --> INJECTION_CHECK: Process
+    [*] --> NORMAL: New Session
 
-    INJECTION_CHECK --> BLOCKED: Pattern Match
-    INJECTION_CHECK --> ALLOWED: No Pattern
+    NORMAL --> WARNED: 1st Injection (0ms delay)
+    WARNED --> CAUTIOUS: 2nd Injection (500ms delay)
+    CAUTIOUS --> ESCALATED: 3rd Injection (1000ms delay)
+    ESCALATED --> ESCALATED: More Injections (2000ms delay)
 
-    BLOCKED --> SNAP_BACK: Log Attempt
-    SNAP_BACK --> [*]: Return In-Character Response
+    ESCALATED --> PROBATION: Genuine Query
+    PROBATION --> NORMAL: 5 Clean Queries
+    PROBATION --> ESCALATED: Injection Attempt
 
-    ALLOWED --> KG_RAG: Continue
-    KG_RAG --> RESPONSE: Generate
-    RESPONSE --> [*]: Return AI Response
+    WARNED --> NORMAL: 5 Clean Queries
+    CAUTIOUS --> NORMAL: 10 Clean Queries
+
+    note right of NORMAL: snap_back response
+    note right of ESCALATED: security_persona response
 ```
 
-## Current Stats
+## Security Response Types
+
+```mermaid
+graph TD
+    subgraph "Detection"
+        QUERY[User Query] --> DETECT{Injection Pattern?}
+    end
+
+    subgraph "Session State"
+        DETECT -->|Yes| STATE{Current State?}
+        STATE -->|normal/warned/cautious| SNAP[Fan Snap-Back]
+        STATE -->|escalated| SECURITY[Security Persona]
+    end
+
+    subgraph "Rate Limiting"
+        SNAP --> DELAY1[+0-1000ms delay]
+        SECURITY --> DELAY2[+2000ms delay]
+    end
+
+    subgraph "Logging"
+        DELAY1 --> LOG[Log to security_log]
+        DELAY2 --> LOG
+        LOG --> RESPONSE[Return Response]
+    end
+
+    DETECT -->|No| CLEAN[Clean Query Processing]
+    CLEAN --> RAG[Hybrid RAG]
+    RAG --> RESPONSE
+
+    style SECURITY fill:#e74c3c
+    style SNAP fill:#f39c12
+    style CLEAN fill:#27ae60
+```
+
+## Trivia System Flow
+
+```mermaid
+graph LR
+    subgraph "Request"
+        REQ[GET /trivia] --> PARAMS{team_id? difficulty?}
+    end
+
+    subgraph "Selection"
+        PARAMS -->|Filter| QUERY[Query trivia_questions]
+        QUERY --> RANDOM[Random Selection]
+    end
+
+    subgraph "Response"
+        RANDOM --> FORMAT[Format Question]
+        FORMAT --> HIDE[Hide correct_answer]
+        HIDE --> CLIENT[Return to Client]
+    end
+
+    subgraph "Check"
+        ANSWER[POST /trivia/check] --> VERIFY{Match?}
+        VERIFY -->|Yes| CORRECT[✓ + Explanation]
+        VERIFY -->|No| WRONG[✗ + Correct Answer]
+    end
+
+    style CORRECT fill:#27ae60
+    style WRONG fill:#e74c3c
+```
+
+## Predictor Integration (IMPLEMENTED)
+
+```mermaid
+graph TB
+    subgraph "Fan App (Soccer-AI)"
+        FAN[Chat Interface]
+        PERSONA[Fan Personas x18]
+        TRIVIA[Trivia System]
+        MOOD[(club_mood)]
+    end
+
+    subgraph "Predictor Module (backend/predictor/)"
+        RATINGS[team_ratings.py]
+        DRAWS[draw_detector.py]
+        BACKTEST[backtest_ratings.py]
+        TUNE[tune_draw_threshold.py]
+    end
+
+    subgraph "Third Knowledge Patterns"
+        P1[close_matchup]
+        P2[midtable_clash]
+        P3[defensive_matchup]
+        P4[parked_bus_risk]
+        P5[derby_caution]
+        P6[top_vs_top]
+    end
+
+    subgraph "Prediction Flow"
+        RATINGS -->|power_diff| DRAWS
+        P1 & P2 & P3 & P4 & P5 & P6 -->|patterns| DRAWS
+        DRAWS -->|62.9% accuracy| FAN
+    end
+
+    subgraph "API Endpoints"
+        API1[GET /predictions/match/home/away]
+        API2[GET /predictions/weekend]
+    end
+
+    DRAWS --> API1
+    DRAWS --> API2
+
+    style RATINGS fill:#f39c12
+    style DRAWS fill:#9b59b6
+    style FAN fill:#3498db
+```
+
+### Predictor Accuracy Metrics
+
+| Metric | Value |
+|--------|-------|
+| Overall Accuracy | **62.9%** |
+| Base Power Ratings | 58.6% |
+| Third Knowledge Boost | +4.3% |
+| Draw Detection Recall | 36.4% |
+| Draw Detection Precision | 47.1% |
+| Optimal Threshold | 0.32 |
+
+### Third Knowledge Pattern Details
+
+| Pattern | Trigger Condition | Draw Boost |
+|---------|-------------------|------------|
+| `close_matchup` | Power diff < 10 | 1.3x - 1.8x |
+| `midtable_clash` | Both teams positions 8-15 | 1.4x |
+| `defensive_matchup` | Both teams defensive style | 1.35x |
+| `parked_bus_risk` | Big favorite + defensive underdog | 1.25x |
+| `derby_caution` | Rivalry match | 1.3x |
+| `top_vs_top` | Both in top 6 | 1.25x |
+
+## Gap Tracker Architecture
+
+```mermaid
+graph TD
+    subgraph "Source Documents"
+        DOCS[.md/.ctx files]
+        SCHEMA[schema.sql]
+        TESTS[test_*.py]
+    end
+
+    subgraph "Scanner"
+        SCAN[scan_implementation_gaps.py]
+        PARSE[Parse TODO/PENDING]
+        COMPARE[Compare docs vs main.py]
+    end
+
+    subgraph "Database"
+        GAPS[(implementation_gaps)]
+    end
+
+    subgraph "Admin API"
+        GET[GET /admin/gaps]
+        UPDATE[POST /admin/gaps/{id}/status]
+    end
+
+    DOCS --> SCAN
+    SCHEMA --> SCAN
+    TESTS --> SCAN
+    SCAN --> PARSE
+    PARSE --> COMPARE
+    COMPARE --> GAPS
+
+    GAPS --> GET
+    UPDATE --> GAPS
+
+    style GAPS fill:#e67e22
+```
+
+## Current Stats (Updated Dec 21, 2025)
 
 | Metric | Value |
 |--------|-------|
 | KG Nodes | 41 |
 | KG Edges | 37 |
-| Clubs (Deep) | 3 (Arsenal, Chelsea, ManU) |
-| Clubs (Basic) | 20 |
-| Legends | 9 |
-| Moments | 12 |
+| Fan Personas | **20** (one per Premier League club) |
+| Clubs (Complete) | 20 (All Premier League) |
+| Legends | 9+ |
+| Moments | 12+ |
 | Rivalries | 9 edges |
+| Trivia Questions | 47 |
+| Security States | 5 (normal→escalated) |
+| Test Cases | 76+ |
+| API Endpoints | 25+ |
 | API Cost/Query | ~$0.002 |
+| **Predictor Accuracy** | **62.9%** |
+| Third Knowledge Patterns | 6 |
 
 ## File Structure
 
 ```
 soccer-AI/
 ├── CLAUDE.md                    # Project instructions
+├── README.md                    # Quick start guide
+├── PC_HANDOFF_INSTRUCTIONS.ctx  # PC Claude briefing
 ├── schema.sql                   # Database schema
 ├── api_design.md               # API specification
 ├── docs/
+│   ├── ARIEL_FULL_STORY.md              # Original vision document
 │   ├── SOCCER_AI_SYSTEM_ATLAS.md        # This file
 │   ├── UNIFIED_IMPLEMENTATION_PLAN.ctx  # Production plan
 │   ├── KG_RAG_IMPLEMENTATION_PLAN.ctx   # KG-RAG details
-│   ├── FOOTBALL_AI_EXPANSION_ROADMAP.ctx
-│   └── REMAINING_PHASES_PRESERVED.ctx
+│   └── FOOTBALL_AI_EXPANSION_ROADMAP.ctx
 ├── backend/
-│   ├── main.py                 # FastAPI entry
-│   ├── database.py             # DB + KG layer
-│   ├── rag.py                  # Hybrid RAG
-│   ├── ai_response.py          # AI generation
+│   ├── main.py                 # FastAPI entry (54KB, 25+ endpoints)
+│   ├── database.py             # DB + KG layer (65KB)
+│   ├── rag.py                  # Hybrid RAG (34KB)
+│   ├── ai_response.py          # AI generation + 20 personas (25KB)
 │   ├── models.py               # Pydantic models
-│   ├── soccer_ai.db            # SQLite database
-│   ├── test_kg.py              # KG tests
-│   ├── test_hybrid_rag.py      # Hybrid tests
-│   └── test_kg_rag_demo.py     # Full demo
-└── frontend/                   # (Separate Plan)
-    └── [React App]
+│   ├── security_session.py     # Injection protection
+│   ├── soccer_ai.db            # SQLite database (335KB)
+│   ├── soccer_ai_kg.db         # Knowledge graph (303KB)
+│   ├── predictor/              # ⭐ Match prediction module
+│   │   ├── team_ratings.py     # ELO-style power ratings
+│   │   ├── draw_detector.py    # Third Knowledge patterns
+│   │   ├── backtest_ratings.py # Validation (70 matches)
+│   │   └── tune_draw_threshold.py # Threshold optimization
+│   ├── kg/                     # Knowledge graph data
+│   ├── routers/                # API route handlers
+│   └── test_*.py               # Test files (10+)
+├── frontend/                   # ✅ React app (build on PC)
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── components/
+│   │   ├── hooks/
+│   │   └── services/
+│   ├── dist/                   # Built output
+│   └── package.json
+└── flask-frontend/             # ⚠️ Testing only - ignore
+    └── app.py
 ```
