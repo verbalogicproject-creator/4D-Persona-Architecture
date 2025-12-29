@@ -102,6 +102,26 @@ The full state space is the Cartesian product:
 \mathcal{P} = E \times R \times L \times T
 \end{equation}
 
+\subsection{Dimension Overview}
+
+Table \ref{tab:dimensions} summarizes the four dimensions with their input signals and computed outputs.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{llll}
+\toprule
+\textbf{Dimension} & \textbf{Input Signal} & \textbf{Computed Output} & \textbf{Example} \\
+\midrule
+X: Emotional & Real-world metrics & Mood state & Match results $\rightarrow$ euphoric \\
+Y: Relational & KG neighbors & Relationship activation & Rival mentioned $\rightarrow$ rivalry mode \\
+Z: Linguistic & Dialect config & Voice identity & Liverpool $\rightarrow$ Scouse dialect \\
+T: Temporal & Recent events & Memory + trajectory & 3 losses $\rightarrow$ declining mood \\
+\bottomrule
+\end{tabular}
+\caption{The four dimensions of persona state with input signals and computed outputs.}
+\label{tab:dimensions}
+\end{table}
+
 \subsection{Dimension X: Emotional}
 
 The emotional dimension represents the affective state of the persona, \textbf{derived from real-world ground truth data} rather than declared.
@@ -322,6 +342,34 @@ The architecture generalizes to any domain where personas should be grounded in 
     \item \textbf{Healthcare}: Wellness companion tone based on actual health data
     \item \textbf{Gaming}: NPC emotions grounded in actual game world state
 \end{itemize}
+
+\subsection{Vignette: Tutor-AI}
+
+Consider a math tutoring AI for a student named Marcus:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Dimension} & \textbf{Signal} & \textbf{State} \\
+\midrule
+X: Emotional & 3 failed quizzes this week & Patient, encouraging \\
+Y: Relational & Struggling with fractions & Fractions $\rightarrow$ prerequisites activated \\
+Z: Linguistic & Age 12, casual setting & Simple language, friendly tone \\
+T: Temporal & Improved from 40\% to 55\% & Momentum positive, celebrate progress \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Traditional approach}: ``Let me explain fractions again. A fraction represents...''
+
+\textbf{4D Persona approach} (computed state: patient + progress-aware):
+
+\begin{quote}
+``Hey Marcus! You know what? Last week you got 4 out of 10 on fractions, and today you got 5.5 out of 10. That's real progress, mate! I can see the multiplication stuff is clicking now. Want to try one more problem together? I think you're closer than you realize.''
+\end{quote}
+
+The tutor's encouragement is \textit{derived} from actual progress data (T), its patience from recent struggles (X), its vocabulary from student profile (Z), and its focus on prerequisites from the knowledge graph (Y).
 
 \section{Conclusion}
 
